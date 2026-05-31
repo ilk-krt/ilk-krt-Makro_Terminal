@@ -109,32 +109,30 @@ POLICY_IMPACTS = {
     }
 }
 
-# Tüm tekil hisselerin listesi
 ALL_STOCKS_LIST = list(set([t for tkrs in PORTFOLIO_UNIVERSE.values() for t in tkrs]))
 
 # ==========================================
-# 2. OTONOM CANLI TRUMP & SPEKÜLASYON MOTORU (RSS)
+# 2. OTONOM CANLI TRUMP SPEKÜLASYON MOTORU (RSS)
 # ==========================================
-def fetch_live_trump_news():
+@st.cache_data
+def fetch_live_trump_news(news_bypass_stamp):
     # Google News RSS: Küresel olarak Trump + borsa/hisse akışını tarar
-    rss_url = "https://news.google.com/rss/search?q=Trump+stock+market+OR+company&hl=en-US&gl=US&ceid=US:en"
+    rss_url = "https://news.google.com/rss/search?q=Trump+stock+market+OR+company+OR+executive+order+OR+law&hl=en-US&gl=US&ceid=US:en"
     news_alerts = []
     try:
         response = requests.get(rss_url, timeout=10)
         root = ET.fromstring(response.content)
         
-        for item in root.findall('.//item')[:30]:  # Son 30 güncel haberi analiz et
+        for item in root.findall('.//item')[:40]:  # Güncel haber derinliğini 40'a çıkardık
             title = item.find('title').text
             link = item.find('link').text
             pub_date = item.find('pubDate').text
             
-            # Başlıkta veya haber özetinde portföyümüzdeki bir hisse geçiyor mu kontrol et
             detected_tickers = []
             for ticker in ALL_STOCKS_LIST:
                 if f" {ticker} " in f" {title} " or f"({ticker})" in title or ticker.lower() in title.lower():
                     detected_tickers.append(ticker)
             
-            # Eğer Trump haberi bizim hisselerden birine dokunuyorsa radara al
             if detected_tickers:
                 news_alerts.append({
                     "Tarih": pub_date[:16],
@@ -144,12 +142,11 @@ def fetch_live_trump_news():
                 })
         
         if not news_alerts:
-            # Eğer spesifik ticker eşleşmediyse genel Trump makro başlıklarını düşür
-            for item in root.findall('.//item')[:4]:
+            for item in root.findall('.//item')[:6]:
                 news_alerts.append({
                     "Tarih": item.find('pubDate').text[:16],
                     "Gelişme / Haber Başlığı": item.find('title').text,
-                    "Hedef Ticker": "📊 MAKRO / SEKTÖREL",
+                    "Hedef Ticker": "📊 MAKRO / YASA / SEKTÖR",
                     "Kaynak Link": item.find('link').text
                 })
     except Exception as e:
@@ -171,7 +168,6 @@ def get_rsi(s, period):
     ma_down = get_rma(-1 * delta.clip(upper=0), period)
     return 100 - (100 / (1 + (ma_up / ma_down.replace(0, 0.001))))
 
-# TTL'i kaldırıp yerine dinamik cache_by_time ekliyoruz (Hafıza kilitlenmesini çözer)
 @st.cache_data
 def calculate_v127_signals(ticker_list, cache_bypass_time):
     if not ticker_list: return pd.DataFrame()
@@ -218,7 +214,6 @@ def calculate_v127_signals(ticker_list, cache_bypass_time):
             pct_w_q = np.clip((log_w_q * 65)**0.8 * 1.8, 0, 100)
             w_pwr_q = get_wma(pd.Series(pct_w_q, index=close.index), 2)
 
-            # 🛠️ FUSION SCORE
             v150_v_avg = vol.rolling(20).mean()
             _kin_b = ((vol > v150_v_avg * 1.2) & (close > open_p)).astype(int)
             _tre_b = (close > close.ewm(span=34).mean()).astype(int)
@@ -257,45 +252,50 @@ def style_puan(val):
 # 5. ARAYÜZ OLUŞTURMA
 # ==========================================
 st.title("🏛️ V127.0 OTONOM MAKRO & EFOR TERMİNALİ")
-st.markdown("Kararnamelerin ve canlı spekülasyonların rasyonel etki puanlarını **ŞAHANE V650 Efor Kırılımı** ve **Whale Power Momentum** verileriyle çakıştırır.")
+st.markdown("Kararnamelerin, yasaların ve canlı spekülasyonların rasyonel etki puanlarını **ŞAHANE V650 Efor Kırılımı** ve **Whale Power Momentum** verileriyle çakıştırır.")
 st.markdown("---")
 
 # 📡 SEKMELİ KOKPİT YAPISI
 tab_radar, tab_matrix = st.tabs(["📡 CANLI TRUMP SPEKÜLASYON RADARI", "📊 POLİTİKA-HİSSE MATRİSİ & HEATMAP"])
 
-# --- TAB 1: CANLI TRUMP SPEKÜLASYON RADARI ---
+# --- TAB 1: CANLI TRUMP SPEKÜLASYON RADARI (YASALAR VE HABERLER) ---
 with tab_radar:
-    st.subheader("🔊 Canlı Medya & Sosyal Medya Akış Filtresi")
-    st.markdown("*Dünya basınında Trump'ın telaffuz ettiği veya doğrudan etkilediği şirket kodları anlık ayıklanır.*")
+    st.subheader("🔊 Canlı Medya, Yasa Tasarıları & Sosyal Medya Akış Filtresi")
+    st.markdown("*Dünya basınında Trump'ın, kararnamelerin ve yeni yasaların telaffuz ettiği şirket kodları anlık ayıklanır.*")
     
     col_btn, col_time = st.columns([1, 4])
-    # Güncelleme için manuel bypass tetiği
-    current_timestamp = str(time.time()) if col_btn.button("🔄 Radarı Anlık Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
     
-    with st.spinner("Beyaz Saray konuşmaları ve global borsa akışı taranıyor..."):
-        live_news = fetch_live_trump_news()
+    # 🎯 HABER/YASA BACAĞI İÇİN BAĞIMSIZ UPDATE BUTONU
+    news_stamp = str(time.time()) if col_btn.button("🔄 Kararname, Yasa ve Haberleri Anlık Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
+    
+    with st.spinner("Beyaz Saray yasa akışları, resmi duyurular ve global borsa akışı taranıyor..."):
+        live_news = fetch_live_trump_news(news_stamp)
         df_news = pd.DataFrame(live_news)
         
         if not df_news.empty:
             st.dataframe(
                 df_news,
                 use_container_width=True,
-                column_config={"Kaynak Link": st.column_config.LinkColumn("Haber Detayı (Link)")},
+                column_config={"Kaynak Link": st.column_config.LinkColumn("Haber / Düzenleme Detayı (Link)")},
                 hide_index=True
             )
         else:
-            st.info("Şu anda radar eşleşmesi olan acil bir hisse spekülasyonu bulunmuyor.")
+            st.info("Şu anda radar eşleşmesi olan acil bir yasa veya hisse spekülasyonu bulunmuyor.")
 
-# --- TAB 2: POLİTİKA-HİSSE MATRİSİ & HEATMAP ---
+# --- TAB 2: POLİTİKA-HİSSE MATRİSİ & HEATMAP (FİYAT ve MATEMATİK MOTORU) ---
 with tab_matrix:
-    col_control, col_space = st.columns([1, 2])
+    st.subheader("📊 Sektörel Katalizör Matrisi & Canlı Güç Dağılımı")
+    
+    col_control, col_btn_live = st.columns([1, 2])
     with col_control:
         selected_policy = st.selectbox("Açıklanan Kararname / Haber Tipi:", list(POLICY_IMPACTS.keys()))
         multiplier = st.slider("Etki Şiddeti Çarpanı", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+    
+    # 🎯 FİYAT VE TEKNİK VERİ BACAĞI İÇİN BAĞIMSIZ FİYAT UPDATE BUTONU
+    live_price_stamp = str(time.time()) if col_btn_live.button("🔄 Canlı Fiyat ve Efor Grafiklerini Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
 
-    # Dinamik zaman damgası her dakika veya butonla yenilenerek yfinance verisini taze tutar
     with st.spinner("🚀 Canlı yfinance verileri, Efor Çizgileri ve Kinetik Güçler hesaplanıyor..."):
-        df_live = calculate_v127_signals(ALL_STOCKS_LIST, current_timestamp)
+        df_live = calculate_v127_signals(ALL_STOCKS_LIST, live_price_stamp)
 
     if not df_live.empty:
         heatmap_rows = []
