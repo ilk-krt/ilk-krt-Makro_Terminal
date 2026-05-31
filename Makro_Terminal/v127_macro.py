@@ -3,7 +3,10 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
+import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+import time
 
 # ==========================================
 # 0. RADİKAL DARK MODE CSS & KESKİN KONTRAST YAMASI
@@ -106,8 +109,56 @@ POLICY_IMPACTS = {
     }
 }
 
+# Tüm tekil hisselerin listesi
+ALL_STOCKS_LIST = list(set([t for tkrs in PORTFOLIO_UNIVERSE.values() for t in tkrs]))
+
 # ==========================================
-# 2. ŞAHANE V650 MATEMATİK MOTORU (YFINANCE)
+# 2. OTONOM CANLI TRUMP & SPEKÜLASYON MOTORU (RSS)
+# ==========================================
+def fetch_live_trump_news():
+    # Google News RSS: Küresel olarak Trump + borsa/hisse akışını tarar
+    rss_url = "https://news.google.com/rss/search?q=Trump+stock+market+OR+company&hl=en-US&gl=US&ceid=US:en"
+    news_alerts = []
+    try:
+        response = requests.get(rss_url, timeout=10)
+        root = ET.fromstring(response.content)
+        
+        for item in root.findall('.//item')[:30]:  # Son 30 güncel haberi analiz et
+            title = item.find('title').text
+            link = item.find('link').text
+            pub_date = item.find('pubDate').text
+            
+            # Başlıkta veya haber özetinde portföyümüzdeki bir hisse geçiyor mu kontrol et
+            detected_tickers = []
+            for ticker in ALL_STOCKS_LIST:
+                if f" {ticker} " in f" {title} " or f"({ticker})" in title or ticker.lower() in title.lower():
+                    detected_tickers.append(ticker)
+            
+            # Eğer Trump haberi bizim hisselerden birine dokunuyorsa radara al
+            if detected_tickers:
+                news_alerts.append({
+                    "Tarih": pub_date[:16],
+                    "Gelişme / Haber Başlığı": title,
+                    "Hedef Ticker": ", ".join(detected_tickers),
+                    "Kaynak Link": link
+                })
+        
+        if not news_alerts:
+            # Eğer spesifik ticker eşleşmediyse genel Trump makro başlıklarını düşür
+            for item in root.findall('.//item')[:4]:
+                news_alerts.append({
+                    "Tarih": item.find('pubDate').text[:16],
+                    "Gelişme / Haber Başlığı": item.find('title').text,
+                    "Hedef Ticker": "📊 MAKRO / SEKTÖREL",
+                    "Kaynak Link": item.find('link').text
+                })
+    except Exception as e:
+        return [{"Tarih": "-", "Gelişme / Haber Başlığı": f"Haber motoru başlatılamadı: {e}", "Hedef Ticker": "HATA", "Kaynak Link": ""}]
+    
+    return news_alerts
+
+# ==========================================
+# 3. ŞAHANE V650 MATEMATİK MOTORU (YFINANCE)
 # ==========================================
 def get_rma(s, period): return s.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
 def get_wma(s, period):
@@ -120,8 +171,9 @@ def get_rsi(s, period):
     ma_down = get_rma(-1 * delta.clip(upper=0), period)
     return 100 - (100 / (1 + (ma_up / ma_down.replace(0, 0.001))))
 
-@st.cache_data(ttl=900)
-def calculate_v127_signals(ticker_list):
+# TTL'i kaldırıp yerine dinamik cache_by_time ekliyoruz (Hafıza kilitlenmesini çözer)
+@st.cache_data
+def calculate_v127_signals(ticker_list, cache_bypass_time):
     if not ticker_list: return pd.DataFrame()
     end_date = datetime.now()
     try:
@@ -185,7 +237,7 @@ def calculate_v127_signals(ticker_list):
     return pd.DataFrame(results)
 
 # ==========================================
-# 3. RENKLENDİRME STYLER FONKSİYONLARI
+# 4. RENKLENDİRME STYLER FONKSİYONLARI
 # ==========================================
 def style_efor(val):
     if '🚀' in str(val): return 'background-color: #00FF88; color: black; font-weight: bold;'
@@ -202,88 +254,110 @@ def style_puan(val):
     return 'color: gray;'
 
 # ==========================================
-# 4. ARAYÜZ OLUŞTURMA
+# 5. ARAYÜZ OLUŞTURMA
 # ==========================================
 st.title("🏛️ V127.0 OTONOM MAKRO & EFOR TERMİNALİ")
-st.markdown("Kararnamelerin rasyonel etki puanlarını **ŞAHANE V650 Efor Kırılımı** ve **Whale Power Momentum** verileriyle birleştirir.")
+st.markdown("Kararnamelerin ve canlı spekülasyonların rasyonel etki puanlarını **ŞAHANE V650 Efor Kırılımı** ve **Whale Power Momentum** verileriyle çakıştırır.")
 st.markdown("---")
 
-col_control, col_space = st.columns([1, 2])
-with col_control:
-    selected_policy = st.selectbox("Açıklanan Kararname / Haber Tipi:", list(POLICY_IMPACTS.keys()))
-    multiplier = st.slider("Etki Şiddeti Çarpanı", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+# 📡 SEKMELİ KOKPİT YAPISI
+tab_radar, tab_matrix = st.tabs(["📡 CANLI TRUMP SPEKÜLASYON RADARI", "📊 POLİTİKA-HİSSE MATRİSİ & HEATMAP"])
 
-# Evrendeki tüm hisseleri tek seferde tara
-all_tickers = list(set([t for tkrs in PORTFOLIO_UNIVERSE.values() for t in tkrs]))
-
-with st.spinner("🚀 Canlı yfinance verileri, Efor Çizgileri ve Kinetik Güçler hesaplanıyor..."):
-    df_live = calculate_v127_signals(all_tickers)
-
-if not df_live.empty:
-    heatmap_rows = []
-    base_impacts = POLICY_IMPACTS[selected_policy]
-
-    for sector, tickers in PORTFOLIO_UNIVERSE.items():
-        base_score = base_impacts.get(sector, 0)
-        final_score = round(base_score * multiplier, 1)
-
-        for t in tickers:
-            # Canlı hesaplanan teknik verileri buraya bağla
-            live_row = df_live[df_live['Ticker'] == t]
-            if not live_row.empty:
-                heatmap_rows.append({
-                    "Sektör / ETF": sector,
-                    "Ticker": t,
-                    "Makro Etki Puanı": final_score,
-                    "Fiyat": live_row['Fiyat'].values[0],
-                    "1 Gün (%)": live_row['1 Gün (%)'].values[0],
-                    "Efor Çizgisi (14M)": live_row['Efor Çizgisi'].values[0],
-                    "Whale Power (Kinetik)": live_row['Whale Power'].values[0],
-                    "Fusion Skor": live_row['Fusion'].values[0]
-                })
-
-    df_final_matrix = pd.DataFrame(heatmap_rows)
-
-    # Ana Isı Haritası Matrisi Gösterimi
-    st.subheader("📊 Canlı Güç Entegrasyonlu Isı Haritası")
-    st.dataframe(
-        df_final_matrix.style.map(style_puan, subset=['Makro Etki Puanı'])
-        .map(style_efor, subset=['Efor Çizgisi (14M)']),
-        use_container_width=True,
-        height=500,
-        hide_index=True
-    )
-
-    # 🎯 AKSİYON PANELİ FILTERİ
-    st.markdown("---")
-    st.subheader("🎯 V127.0 Çarpan Etkisi Aksiyon Paneli")
-
-    # Makro puanı yüksek olan ve efor çizgisi UP veya POZ olanları ayır
-    top_buys = df_final_matrix[(df_final_matrix['Makro Etki Puanı'] >= 5) & (df_final_matrix['Efor Çizgisi (14M)'].str.contains('POZ|UP'))]['Ticker'].tolist()
-    top_sells = df_final_matrix[(df_final_matrix['Makro Etki Puanı'] <= -5) & (df_final_matrix['Efor Çizgisi (14M)'].str.contains('NEG|DOWN'))]['Ticker'].tolist()
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.success(f"🟢 Makro + Efor Onaylı BUY Adayları: {', '.join(top_buys) if top_buys else 'Koşul sağlayan yok'}")
-        all_candidates = list(set(top_buys + top_sells))
-        if not all_candidates: all_candidates = df_final_matrix['Ticker'].tolist()
-        trade_ticker = st.selectbox("Aksiyon İçin Hisse Seçin:", sorted(all_candidates))
-        trade_dir = "BUY" if trade_ticker in top_buys else "SELL" if trade_ticker in top_sells else "NÖTR"
-
-    with col4:
-        st.error(f"🔴 Makro + Efor Onaylı Dynamic SELL Adayları: {', '.join(top_sells) if top_sells else 'Koşul sağlayan yok'}")
+# --- TAB 1: CANLI TRUMP SPEKÜLASYON RADARI ---
+with tab_radar:
+    st.subheader("🔊 Canlı Medya & Sosyal Medya Akış Filtresi")
+    st.markdown("*Dünya basınında Trump'ın telaffuz ettiği veya doğrudan etkilediği şirket kodları anlık ayıklanır.*")
+    
+    col_btn, col_time = st.columns([1, 4])
+    # Güncelleme için manuel bypass tetiği
+    current_timestamp = str(time.time()) if col_btn.button("🔄 Radarı Anlık Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
+    
+    with st.spinner("Beyaz Saray konuşmaları ve global borsa akışı taranıyor..."):
+        live_news = fetch_live_trump_news()
+        df_news = pd.DataFrame(live_news)
         
-        with st.form("v134_action_form"):
-            selected_row = df_final_matrix[df_final_matrix['Ticker'] == trade_ticker]
-            if not selected_row.empty:
-                st.markdown(f"**Seçilen Hisse:** `{trade_ticker}` | **Önerilen Yön:** `{trade_dir}`")
-                st.markdown(f"**Anlık Efor Durumu:** {selected_row['Efor Çizgisi (14M)'].values[0]} | **Whale Power:** %{selected_row['Whale Power (Kinetik)'].values[0]}")
+        if not df_news.empty:
+            st.dataframe(
+                df_news,
+                use_container_width=True,
+                column_config={"Kaynak Link": st.column_config.LinkColumn("Haber Detayı (Link)")},
+                hide_index=True
+            )
+        else:
+            st.info("Şu anda radar eşleşmesi olan acil bir hisse spekülasyonu bulunmuyor.")
+
+# --- TAB 2: POLİTİKA-HİSSE MATRİSİ & HEATMAP ---
+with tab_matrix:
+    col_control, col_space = st.columns([1, 2])
+    with col_control:
+        selected_policy = st.selectbox("Açıklanan Kararname / Haber Tipi:", list(POLICY_IMPACTS.keys()))
+        multiplier = st.slider("Etki Şiddeti Çarpanı", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+
+    # Dinamik zaman damgası her dakika veya butonla yenilenerek yfinance verisini taze tutar
+    with st.spinner("🚀 Canlı yfinance verileri, Efor Çizgileri ve Kinetik Güçler hesaplanıyor..."):
+        df_live = calculate_v127_signals(ALL_STOCKS_LIST, current_timestamp)
+
+    if not df_live.empty:
+        heatmap_rows = []
+        base_impacts = POLICY_IMPACTS[selected_policy]
+
+        for sector, tickers in PORTFOLIO_UNIVERSE.items():
+            base_score = base_impacts.get(sector, 0)
+            final_score = round(base_score * multiplier, 1)
+
+            for t in tickers:
+                live_row = df_live[df_live['Ticker'] == t]
+                if not live_row.empty:
+                    heatmap_rows.append({
+                        "Sektör / ETF": sector,
+                        "Ticker": t,
+                        "Makro Etki Puanı": final_score,
+                        "Fiyat": live_row['Fiyat'].values[0],
+                        "1 Gün (%)": live_row['1 Gün (%)'].values[0],
+                        "Efor Çizgisi (14M)": live_row['Efor Çizgisi'].values[0],
+                        "Whale Power (Kinetik)": live_row['Whale Power'].values[0],
+                        "Fusion Skor": live_row['Fusion'].values[0]
+                    })
+
+        df_final_matrix = pd.DataFrame(heatmap_rows)
+
+        st.dataframe(
+            df_final_matrix.style.map(style_puan, subset=['Makro Etki Puanı'])
+            .map(style_efor, subset=['Efor Çizgisi (14M)']),
+            use_container_width=True,
+            height=500,
+            hide_index=True
+        )
+
+        # 🎯 AKSİYON PANELİ FILTERİ
+        st.markdown("---")
+        st.subheader("🎯 V127.0 Çarpan Etkisi Aksiyon Paneli")
+
+        top_buys = df_final_matrix[(df_final_matrix['Makro Etki Puanı'] >= 5) & (df_final_matrix['Efor Çizgisi (14M)'].str.contains('POZ|UP'))]['Ticker'].tolist()
+        top_sells = df_final_matrix[(df_final_matrix['Makro Etki Puanı'] <= -5) & (df_final_matrix['Efor Çizgisi (14M)'].str.contains('NEG|DOWN'))]['Ticker'].tolist()
+
+        col3, col4 = st.columns(2)
+        with col3:
+            st.success(f"🟢 Makro + Efor Onaylı BUY Adayları: {', '.join(top_buys) if top_buys else 'Koşul sağlayan yok'}")
+            all_candidates = list(set(top_buys + top_sells))
+            if not all_candidates: all_candidates = df_final_matrix['Ticker'].tolist()
+            trade_ticker = st.selectbox("Aksiyon İçin Hisse Seçin:", sorted(all_candidates))
+            trade_dir = "BUY" if trade_ticker in top_buys else "SELL" if trade_ticker in top_sells else "NÖTR"
+
+        with col4:
+            st.error(f"🔴 Makro + Efor Onaylı Dynamic SELL Adayları: {', '.join(top_sells) if top_sells else 'Koşul sağlayan yok'}")
             
-            trade_channel = st.selectbox("Kırılım Yaşanan Kanal Çizgisi (V127.0)", [f"Kanal {i}" for i in range(1, 13)])
-            trade_close_focus = st.text_input("Close-Only Focus Kapanış Seviyesi Notları")
-            
-            submitted = st.form_submit_button("Doğrulamayı Hafızaya Al ve Logla")
-            if submitted:
-                st.success(f"🔓 {trade_ticker} işlemi {trade_channel} üzerinden {trade_dir} yönlü başarıyla kaydedildi! Kapanış Odak Noktası: {trade_close_focus}")
-else:
-    st.error("Canlı piyasa verileri çekilemedi, internet bağlantınızı veya yfinance kütüphanesini kontrol edin.")
+            with st.form("v134_action_form"):
+                selected_row = df_final_matrix[df_final_matrix['Ticker'] == trade_ticker]
+                if not selected_row.empty:
+                    st.markdown(f"**Seçilen Hisse:** `{trade_ticker}` | **Önerilen Yön:** `{trade_dir}`")
+                    st.markdown(f"**Anlık Efor Durumu:** {selected_row['Efor Çizgisi (14M)'].values[0]} | **Whale Power:** %{selected_row['Whale Power (Kinetik)'].values[0]}")
+                
+                trade_channel = st.selectbox("Kırılım Yaşanan Kanal Çizgisi (V127.0)", [f"Kanal {i}" for i in range(1, 13)])
+                trade_close_focus = st.text_input("Close-Only Focus Kapanış Seviyesi Notları")
+                
+                submitted = st.form_submit_button("Doğrulamayı Hafızaya Al ve Logla")
+                if submitted:
+                    st.success(f"🔓 {trade_ticker} işlemi {trade_channel} üzerinden {trade_dir} yönlü başarıyla kaydedildi! Kapanış Odak Noktası: {trade_close_focus}")
+    else:
+        st.error("Canlı piyasa verileri çekilemedi, internet bağlantınızı veya yfinance kütüphanesini kontrol edin.")
