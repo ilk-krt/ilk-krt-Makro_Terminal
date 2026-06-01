@@ -7,6 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 import time
+import re
 
 # ==========================================
 # 0. RADİKAL DARK MODE CSS & KESKİN KONTRAST YAMASI
@@ -123,14 +124,17 @@ def fetch_live_trump_news(news_bypass_stamp):
         response = requests.get(rss_url, timeout=10)
         root = ET.fromstring(response.content)
         
-        for item in root.findall('.//item')[:40]:  # Güncel haber derinliğini 40'a çıkardık
+        for item in root.findall('.//item')[:40]:  
             title = item.find('title').text
             link = item.find('link').text
             pub_date = item.find('pubDate').text
             
             detected_tickers = []
             for ticker in ALL_STOCKS_LIST:
-                if f" {ticker} " in f" {title} " or f"({ticker})" in title or ticker.lower() in title.lower():
+                # DÜZELTME: Sadece Ticker'ın bağımsız bir kelime olarak geçtiği (Word Boundary) veya parantez içinde yazıldığı durumları eşleştir
+                # Böylece "F" (Ford) hissesi, "Office" veya "After" kelimeleriyle eşleşmeyecektir.
+                pattern = rf"\b{ticker}\b" 
+                if re.search(pattern, title) or f"({ticker})" in title:
                     detected_tickers.append(ticker)
             
             if detected_tickers:
@@ -266,7 +270,7 @@ with tab_radar:
     col_btn, col_time = st.columns([1, 4])
     
     # 🎯 HABER/YASA BACAĞI İÇİN BAĞIMSIZ UPDATE BUTONU
-    news_stamp = str(time.time()) if col_btn.button("🔄 Kararname, Yasa ve Haberleri Anlık Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
+    news_stamp = str(time.time()) if col_btn.button("🔄 Haberleri Anlık Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
     
     with st.spinner("Beyaz Saray yasa akışları, resmi duyurular ve global borsa akışı taranıyor..."):
         live_news = fetch_live_trump_news(news_stamp)
@@ -286,13 +290,18 @@ with tab_radar:
 with tab_matrix:
     st.subheader("📊 Sektörel Katalizör Matrisi & Canlı Güç Dağılımı")
     
-    col_control, col_btn_live = st.columns([1, 2])
+    # YENİ EKLENTİ: Kararname güncellemesi için bağımsız yapı
+    col_control, col_btn_live = st.columns(2)
+    
     with col_control:
         selected_policy = st.selectbox("Açıklanan Kararname / Haber Tipi:", list(POLICY_IMPACTS.keys()))
         multiplier = st.slider("Etki Şiddeti Çarpanı", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+        policy_update_btn = st.button("🔄 Kararnameleri ve Etkiyi Matrise Uygula", use_container_width=True)
     
-    # 🎯 FİYAT VE TEKNİK VERİ BACAĞI İÇİN BAĞIMSIZ FİYAT UPDATE BUTONU
-    live_price_stamp = str(time.time()) if col_btn_live.button("🔄 Canlı Fiyat ve Efor Grafiklerini Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
+    with col_btn_live:
+        st.markdown("<br><br>", unsafe_allow_html=True) # Butonu hizalamak için boşluk
+        # 🎯 FİYAT VE TEKNİK VERİ BACAĞI İÇİN BAĞIMSIZ FİYAT UPDATE BUTONU
+        live_price_stamp = str(time.time()) if st.button("🔄 Canlı Fiyat ve Efor Grafiklerini Güncelle", use_container_width=True) else str(time.strftime("%Y-%m-%d_%H"))
 
     with st.spinner("🚀 Canlı yfinance verileri, Efor Çizgileri ve Kinetik Güçler hesaplanıyor..."):
         df_live = calculate_v127_signals(ALL_STOCKS_LIST, live_price_stamp)
